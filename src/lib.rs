@@ -1,3 +1,4 @@
+pub(crate) mod snapshot;
 pub(crate) mod storage;
 
 pub type Key = Vec<u8>;
