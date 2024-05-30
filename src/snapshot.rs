@@ -1,9 +1,11 @@
 use crate::storage::AtomicStorage;
-use crate::{Key, Value};
+use crate::{Key, KeyRef, Value};
+use anyhow::anyhow;
 use futures::TryFutureExt;
 use itertools::{merge_join_by, sorted, EitherOrBoth};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use tracing::debug;
 
 pub type Generation = u64;
 
@@ -72,10 +74,7 @@ impl LazySnapshotIndex {
 
         for key in changes {
             let maybe_value = inner.db.get(key)?;
-            let snapshot_entry = inner
-                .snapshots
-                .entry(key.clone())
-                .or_default();
+            let snapshot_entry = inner.snapshots.entry(key.clone()).or_default();
             snapshot_entry.insert(current_generation, maybe_value);
         }
 
@@ -107,8 +106,7 @@ impl LazySnapshotIndexInner {
         let keys_to_visit = removable_generations
             .iter()
             .flat_map(|generation| {
-                self
-                    .active_generations
+                self.active_generations
                     .remove(generation)
                     .expect("exists")
                     .mutated_keys
@@ -128,7 +126,7 @@ impl LazySnapshotIndexInner {
 }
 
 impl Snapshot {
-    pub fn get(&self, key: &Key) -> anyhow::Result<Option<Value>> {
+    pub fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
         let inner = self.inner.read().expect("Poisoned lock");
         inner
             .snapshots
@@ -165,22 +163,44 @@ impl Snapshot {
             db_prefix_result,
             |(key1, _), (key2, _)| key1.cmp(key2),
         )
-            .filter_map(|either| match either {
-                // Always use snapshot values …
-                EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
-                // … but if there is no snapshot value, use the db value …
-                EitherOrBoth::Right((key, value)) => Some((key, value)),
-                // … and if there is both, use the snapshot value.
-                EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            // Always use snapshot values …
+            EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
+            // … but if there is no snapshot value, use the db value …
+            EitherOrBoth::Right((key, value)) => Some((key, value)),
+            // … and if there is both, use the snapshot value.
+            EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
+    }
+
+    /// Check if any newer generations than the one the snapshot was created in have mutated the `keys` supplied.
+    pub fn check_conflicts(&self, keys: &HashSet<Key>) -> bool {
+        let inner = self.inner.read().expect("Poisoned lock");
+        inner.active_generations.range((self.generation + 1)..).any(
+            |(generation_idx, generation)| {
+                let conflicts = generation
+                    .mutated_keys
+                    .intersection(keys)
+                    .collect::<Vec<_>>();
+                debug!(
+                    "Conflict on keys: {:?} in generation {}",
+                    conflicts, generation_idx
+                );
+
+                !conflicts.is_empty()
+            },
+        )
     }
 }
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        self.inner.write().expect("Poisoned lock").remove_snapshot(self);
+        self.inner
+            .write()
+            .expect("Poisoned lock")
+            .remove_snapshot(self);
     }
 }

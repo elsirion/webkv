@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap};
-use std::sync::Mutex;
-use crate::{Key, KeyRef, Value};
 use crate::storage::IAtomicStorage;
+use crate::{Key, KeyRef, Value};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 #[derive(Default, Debug)]
 struct MemStorage {
@@ -17,7 +17,8 @@ impl IAtomicStorage for MemStorage {
         let prefix = prefix.to_vec();
         let result = self
             .data
-            .lock().expect("poisoned")
+            .lock()
+            .expect("poisoned")
             .range(prefix.clone()..)
             .take_while(|(key, _)| key.starts_with(&prefix))
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -40,5 +41,3 @@ impl IAtomicStorage for MemStorage {
         Ok(())
     }
 }
-
-

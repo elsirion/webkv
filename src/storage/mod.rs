@@ -1,8 +1,9 @@
 mod memory;
 
 use crate::{Key, KeyRef, Value};
+use std::sync::Arc;
 
-pub type AtomicStorage = Box<dyn IAtomicStorage>;
+pub type AtomicStorage = Arc<dyn IAtomicStorage>;
 
 /// Database that allows atomic writes
 ///
