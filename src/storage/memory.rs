@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 #[derive(Default, Debug)]
-struct MemStorage {
+pub struct MemStorage {
     data: Mutex<BTreeMap<Key, Value>>,
 }
 

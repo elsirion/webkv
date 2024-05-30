@@ -1,4 +1,4 @@
-mod memory;
+pub mod memory;
 
 use crate::{Key, KeyRef, Value};
 use std::sync::Arc;

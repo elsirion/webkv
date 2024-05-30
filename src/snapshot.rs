@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use futures::TryFutureExt;
 use itertools::{merge_join_by, sorted, EitherOrBoth};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 use tracing::debug;
 
@@ -64,6 +65,7 @@ impl LazySnapshotIndex {
         }
     }
 
+    /// Has to be called before writing changes to the database to generate a sparse snapshot of the current DB state.
     pub fn add_generation(&self, changes: &[Key]) -> anyhow::Result<()> {
         // FIXME: don't write if no transactions are active
         // TODO: maybe even filter out keys that are shadowed anyway
@@ -125,6 +127,17 @@ impl LazySnapshotIndexInner {
     }
 }
 
+impl Debug for LazySnapshotIndex {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.read().expect("Poisoned lock");
+        f.debug_struct("LazySnapshotIndex")
+            .field("current_generation", &inner.current_generation)
+            .field("active_generations", &inner.active_generations)
+            .field("snapshots", &inner.snapshots)
+            .finish()
+    }
+}
+
 impl Snapshot {
     pub fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
         let inner = self.inner.read().expect("Poisoned lock");
@@ -163,15 +176,15 @@ impl Snapshot {
             db_prefix_result,
             |(key1, _), (key2, _)| key1.cmp(key2),
         )
-        .filter_map(|either| match either {
-            // Always use snapshot values …
-            EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
-            // … but if there is no snapshot value, use the db value …
-            EitherOrBoth::Right((key, value)) => Some((key, value)),
-            // … and if there is both, use the snapshot value.
-            EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
-        })
-        .collect::<Vec<_>>();
+            .filter_map(|either| match either {
+                // Always use snapshot values …
+                EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
+                // … but if there is no snapshot value, use the db value …
+                EitherOrBoth::Right((key, value)) => Some((key, value)),
+                // … and if there is both, use the snapshot value.
+                EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
+            })
+            .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -202,5 +215,87 @@ impl Drop for Snapshot {
             .write()
             .expect("Poisoned lock")
             .remove_snapshot(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::snapshot::{LazySnapshotIndex, Snapshot};
+    use crate::storage::memory::MemStorage;
+    use crate::storage::IAtomicStorage;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_snapshot() {
+        let db = Arc::new(MemStorage::default());
+        let initial_db = vec![
+            (b"k1".to_vec(), Some(b"value1".to_vec())),
+            (b"k2".to_vec(), Some(b"value2".to_vec())),
+            (b"k3".to_vec(), Some(b"value3".to_vec())),
+            (b"a1".to_vec(), Some(b"other_value".to_vec())),
+        ];
+        db.write_atomically(initial_db).unwrap();
+
+        let snapshot_index = LazySnapshotIndex::new(db.clone());
+        assert_eq!(snapshot_index.inner.read().unwrap().current_generation, 1);
+
+        fn assert_s0_reads_initial(s0: &Snapshot) {
+            assert_eq!(s0.generation, 1);
+            assert_eq!(s0.get(b"k1").unwrap(), Some(b"value1".to_vec()));
+            assert_eq!(s0.find_by_prefix(b"k").unwrap().len(), 3);
+        }
+        let s0 = snapshot_index.snapshot();
+        assert_s0_reads_initial(&s0);
+
+        let c1 = vec![
+            (b"k1".to_vec(), Some(b"new_value1".to_vec())),
+            (b"k2".to_vec(), None),
+        ];
+        snapshot_index
+            .add_generation(&c1.iter().map(|(k, _v)| k.clone()).collect::<Vec<_>>())
+            .unwrap();
+        db.write_atomically(c1).unwrap();
+        assert_eq!(snapshot_index.inner.read().unwrap().current_generation, 2);
+
+        assert_s0_reads_initial(&s0);
+        let s1a = snapshot_index.snapshot();
+        let s1b = snapshot_index.snapshot();
+        assert_s0_reads_initial(&s0);
+
+        fn assert_s1_reads_updates(s1: &Snapshot) {
+            assert_eq!(s1.generation, 2);
+            assert_eq!(s1.get(b"k1").unwrap(), Some(b"new_value1".to_vec()));
+            assert_eq!(s1.get(b"k2").unwrap(), None);
+            assert_eq!(s1.find_by_prefix(b"k").unwrap().len(), 2);
+        }
+        assert_s1_reads_updates(&s1a);
+        assert_s1_reads_updates(&s1b);
+
+        snapshot_index.add_generation(&[b"k1".to_vec()]).unwrap();
+        assert_eq!(snapshot_index.inner.read().unwrap().current_generation, 3);
+        dbg!(&snapshot_index);
+
+        {
+            let si_guard = snapshot_index.inner.read().unwrap();
+            assert_eq!(si_guard.active_generations[&1].references, 1);
+            assert_eq!(si_guard.active_generations[&2].references, 2);
+        }
+        drop(s0);
+
+        {
+            let si_guard = snapshot_index.inner.read().unwrap();
+            assert!(si_guard.active_generations.get(&1).is_none());
+            assert_eq!(si_guard.active_generations[&2].references, 2);
+        }
+        drop(s1a);
+        {
+            let si_guard = snapshot_index.inner.read().unwrap();
+            assert_eq!(si_guard.active_generations[&2].references, 1);
+        }
+        drop(s1b);
+        {
+            let si_guard = snapshot_index.inner.read().unwrap();
+            assert!(si_guard.active_generations.is_empty());
+        }
     }
 }

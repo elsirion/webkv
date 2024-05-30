@@ -106,6 +106,13 @@ impl Transaction {
             return Err(anyhow::anyhow!("Write-write conflict detected"));
         }
 
+        self.db.snapshot_index.add_generation(
+            &self
+                .changes
+                .iter()
+                .map(|(k, _v)| k.clone())
+                .collect::<Vec<_>>(),
+        )?;
         self.db
             .db
             .write_atomically(self.changes.into_iter().collect())
