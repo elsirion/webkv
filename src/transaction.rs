@@ -2,7 +2,7 @@ use crate::snapshot::{LazySnapshotIndex, Snapshot};
 use crate::storage::AtomicStorage;
 use crate::{Key, KeyRef, Value};
 use itertools::{merge_join_by, EitherOrBoth};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub struct Database {
@@ -26,6 +26,8 @@ impl Database {
     pub fn new(db: AtomicStorage) -> Self {
         let snapshot_index = LazySnapshotIndex::new(db.clone());
         Self {
+            // TODO: introduce maybe_send_sync
+            #[allow(clippy::arc_with_non_send_sync)]
             inner: Arc::new(DatabaseInner {
                 db,
                 snapshot_index,
@@ -65,16 +67,16 @@ impl Transaction {
             snapshot_prefix_result,
             |(key1, _), (key2, _)| (*key1).cmp(key2),
         )
-        .filter_map(|either| match either {
-            EitherOrBoth::Left((key, maybe_value)) => {
-                maybe_value.clone().map(|value| (key.clone(), value))
-            }
-            EitherOrBoth::Right((key, value)) => Some((key, value)),
-            EitherOrBoth::Both((key, maybe_value), _snapshot) => {
-                maybe_value.clone().map(|value| (key.clone(), value))
-            }
-        })
-        .collect::<Vec<_>>();
+            .filter_map(|either| match either {
+                EitherOrBoth::Left((key, maybe_value)) => {
+                    maybe_value.clone().map(|value| (key.clone(), value))
+                }
+                EitherOrBoth::Right((key, value)) => Some((key, value)),
+                EitherOrBoth::Both((key, maybe_value), _snapshot) => {
+                    maybe_value.clone().map(|value| (key.clone(), value))
+                }
+            })
+            .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -109,8 +111,8 @@ impl Transaction {
         self.db.snapshot_index.add_generation(
             &self
                 .changes
-                .iter()
-                .map(|(k, _v)| k.clone())
+                .keys()
+                .cloned()
                 .collect::<Vec<_>>(),
         )?;
         self.db

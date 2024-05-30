@@ -1,9 +1,7 @@
 use crate::storage::AtomicStorage;
 use crate::{Key, KeyRef, Value};
-use anyhow::anyhow;
-use futures::TryFutureExt;
-use itertools::{merge_join_by, sorted, EitherOrBoth};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use itertools::{merge_join_by, EitherOrBoth};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 use tracing::debug;
@@ -37,6 +35,8 @@ pub struct Snapshot {
 impl LazySnapshotIndex {
     pub fn new(db: AtomicStorage) -> Self {
         Self {
+            // TODO: introduce maybe_send_sync
+            #[allow(clippy::arc_with_non_send_sync)]
             inner: Arc::new(RwLock::new(LazySnapshotIndexInner {
                 db,
                 current_generation: 1,
