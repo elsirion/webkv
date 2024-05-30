@@ -1,9 +1,9 @@
 pub mod memory;
 
-use crate::{Key, KeyRef, Value};
+use crate::{Key, KeyRef, maybe_add_send_sync, Value};
 use std::sync::Arc;
 
-pub type AtomicStorage = Arc<dyn IAtomicStorage>;
+pub type AtomicStorage = Arc<maybe_add_send_sync!(dyn IAtomicStorage)>;
 
 /// Database that allows atomic writes
 ///

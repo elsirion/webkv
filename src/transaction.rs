@@ -26,8 +26,6 @@ impl Database {
     pub fn new(db: AtomicStorage) -> Self {
         let snapshot_index = LazySnapshotIndex::new(db.clone());
         Self {
-            // TODO: introduce maybe_send_sync
-            #[allow(clippy::arc_with_non_send_sync)]
             inner: Arc::new(DatabaseInner {
                 db,
                 snapshot_index,

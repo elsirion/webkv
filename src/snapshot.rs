@@ -35,8 +35,6 @@ pub struct Snapshot {
 impl LazySnapshotIndex {
     pub fn new(db: AtomicStorage) -> Self {
         Self {
-            // TODO: introduce maybe_send_sync
-            #[allow(clippy::arc_with_non_send_sync)]
             inner: Arc::new(RwLock::new(LazySnapshotIndexInner {
                 db,
                 current_generation: 1,

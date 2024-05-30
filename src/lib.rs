@@ -1,6 +1,7 @@
 pub(crate) mod snapshot;
 pub(crate) mod storage;
 mod transaction;
+pub(crate) mod util;
 
 pub use transaction::{Database, Transaction};
 pub use storage::memory::MemStorage;
