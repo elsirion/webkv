@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 
 pub type Generation = u64;
 
-struct LazySnapshotIndex {
+pub struct LazySnapshotIndex {
     inner: Arc<RwLock<LazySnapshotIndexInner>>,
 }
 
@@ -62,49 +62,6 @@ impl LazySnapshotIndex {
         }
     }
 
-    pub async fn remove_snapshot(&self, snapshot: Snapshot) {
-        let mut inner = self.inner.write().expect("Poisoned lock");
-        let active_generation = inner
-            .active_generations
-            .get_mut(&snapshot.generation)
-            .expect("Generation not found");
-        active_generation.references -= 1;
-
-        // Now that we have removed a reference to the generation we can check if it can be removed. We only remove from oldest to newest since removing generations in the middle would require complicated checks if some of the cached keys held by it might still be needed.
-
-        // Find the largest set of consecutive generations that can be removed starting from the oldest one
-        let removable_generations = inner
-            .active_generations
-            .iter()
-            .take_while(|(_, active_generation)| active_generation.references == 0)
-            .map(|(generation, _)| *generation)
-            .collect::<Vec<_>>();
-        // TODO: We might be removing one generation less than we could, since snapshots will only ever read generations strictly larger than their own, but that seems ok for now.
-        let max_removable_generation = removable_generations.last().copied().unwrap_or(0);
-
-        // Collect all keys that we need to visit since they were mutated in the removable generations and thus hold value backups for older snapshots to read
-        let keys_to_visit = removable_generations
-            .iter()
-            .flat_map(|generation| {
-                inner
-                    .active_generations
-                    .remove(generation)
-                    .expect("exists")
-                    .mutated_keys
-            })
-            .collect::<Vec<_>>();
-
-        for key in keys_to_visit {
-            let snapshot_entry = inner.snapshots.get_mut(&key).expect("key not found");
-
-            // Remove all value generations that are inside the removable range
-            *snapshot_entry = snapshot_entry.split_off(&(max_removable_generation + 1));
-            if snapshot_entry.is_empty() {
-                inner.snapshots.remove(&key);
-            }
-        }
-    }
-
     pub fn add_generation(&self, changes: &[Key]) -> anyhow::Result<()> {
         // FIXME: don't write if no transactions are active
         // TODO: maybe even filter out keys that are shadowed anyway
@@ -123,6 +80,50 @@ impl LazySnapshotIndex {
         }
 
         Ok(())
+    }
+}
+
+impl LazySnapshotIndexInner {
+    fn remove_snapshot(&mut self, snapshot: &Snapshot) {
+        let active_generation = self
+            .active_generations
+            .get_mut(&snapshot.generation)
+            .expect("Generation not found");
+        active_generation.references -= 1;
+
+        // Now that we have removed a reference to the generation we can check if it can be removed. We only remove from oldest to newest since removing generations in the middle would require complicated checks if some of the cached keys held by it might still be needed.
+
+        // Find the largest set of consecutive generations that can be removed starting from the oldest one
+        let removable_generations = self
+            .active_generations
+            .iter()
+            .take_while(|(_, active_generation)| active_generation.references == 0)
+            .map(|(generation, _)| *generation)
+            .collect::<Vec<_>>();
+        // TODO: We might be removing one generation less than we could, since snapshots will only ever read generations strictly larger than their own, but that seems ok for now.
+        let max_removable_generation = removable_generations.last().copied().unwrap_or(0);
+
+        // Collect all keys that we need to visit since they were mutated in the removable generations and thus hold value backups for older snapshots to read
+        let keys_to_visit = removable_generations
+            .iter()
+            .flat_map(|generation| {
+                self
+                    .active_generations
+                    .remove(generation)
+                    .expect("exists")
+                    .mutated_keys
+            })
+            .collect::<Vec<_>>();
+
+        for key in keys_to_visit {
+            let snapshot_entry = self.snapshots.get_mut(&key).expect("key not found");
+
+            // Remove all value generations that are inside the removable range
+            *snapshot_entry = snapshot_entry.split_off(&(max_removable_generation + 1));
+            if snapshot_entry.is_empty() {
+                self.snapshots.remove(&key);
+            }
+        }
     }
 }
 
@@ -175,5 +176,11 @@ impl Snapshot {
             .collect::<Vec<_>>();
 
         Ok(result)
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        self.inner.write().expect("Poisoned lock").remove_snapshot(self);
     }
 }
