@@ -38,7 +38,15 @@ impl LazySnapshotIndex {
             inner: Arc::new(RwLock::new(LazySnapshotIndexInner {
                 db,
                 current_generation: 1,
-                active_generations: BTreeMap::new(),
+                active_generations: vec![(
+                    1,
+                    ActiveGeneration {
+                        references: 0,
+                        mutated_keys: Default::default(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 snapshots: Default::default(),
             })),
         }
@@ -47,14 +55,14 @@ impl LazySnapshotIndex {
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = self.inner.write().expect("Poisoned lock");
         let generation = inner.current_generation;
-        let active_generations_entry =
-            inner
-                .active_generations
-                .entry(generation)
-                .or_insert_with(|| ActiveGeneration {
-                    references: 0,
-                    mutated_keys: HashSet::new(),
-                });
+        let active_generations_entry = inner
+            .active_generations
+            .entry(generation)
+            // TODO: separate out generations from snapshots
+            .or_insert_with(|| ActiveGeneration {
+                references: 0,
+                mutated_keys: HashSet::new(),
+            });
         active_generations_entry.references += 1;
 
         Snapshot {
@@ -71,6 +79,14 @@ impl LazySnapshotIndex {
         let mut inner = self.inner.write().expect("Poisoned lock");
         inner.current_generation += 1;
         let current_generation = inner.current_generation;
+
+        inner.active_generations.insert(
+            current_generation,
+            ActiveGeneration {
+                references: 0,
+                mutated_keys: changes.iter().cloned().collect(),
+            },
+        );
 
         for key in changes {
             let maybe_value = inner.db.get(key)?;
@@ -111,7 +127,7 @@ impl LazySnapshotIndexInner {
                     .expect("exists")
                     .mutated_keys
             })
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
 
         for key in keys_to_visit {
             let snapshot_entry = self.snapshots.get_mut(&key).expect("key not found");
@@ -174,15 +190,15 @@ impl Snapshot {
             db_prefix_result,
             |(key1, _), (key2, _)| key1.cmp(key2),
         )
-            .filter_map(|either| match either {
-                // Always use snapshot values …
-                EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
-                // … but if there is no snapshot value, use the db value …
-                EitherOrBoth::Right((key, value)) => Some((key, value)),
-                // … and if there is both, use the snapshot value.
-                EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            // Always use snapshot values …
+            EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
+            // … but if there is no snapshot value, use the db value …
+            EitherOrBoth::Right((key, value)) => Some((key, value)),
+            // … and if there is both, use the snapshot value.
+            EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -271,7 +287,14 @@ mod tests {
 
         snapshot_index.add_generation(&[b"k1".to_vec()]).unwrap();
         assert_eq!(snapshot_index.inner.read().unwrap().current_generation, 3);
-        dbg!(&snapshot_index);
+
+        assert!(s0.check_conflicts(&[b"k1".to_vec()].iter().cloned().collect()));
+        assert!(s0.check_conflicts(&[b"k2".to_vec()].iter().cloned().collect()));
+        assert!(!s0.check_conflicts(&[b"k3".to_vec()].iter().cloned().collect()));
+        assert!(!s0.check_conflicts(&[b"kx".to_vec()].iter().cloned().collect()));
+
+        assert!(s1a.check_conflicts(&[b"k1".to_vec()].iter().cloned().collect()));
+        assert!(!s1a.check_conflicts(&[b"k2".to_vec()].iter().cloned().collect()));
 
         {
             let si_guard = snapshot_index.inner.read().unwrap();

@@ -1,6 +1,6 @@
 pub mod memory;
 
-use crate::{Key, KeyRef, maybe_add_send_sync, Value};
+use crate::{maybe_add_send_sync, Key, KeyRef, Value};
 use std::sync::Arc;
 
 pub type AtomicStorage = Arc<maybe_add_send_sync!(dyn IAtomicStorage)>;

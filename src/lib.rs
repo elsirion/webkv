@@ -3,9 +3,9 @@ pub(crate) mod storage;
 mod transaction;
 pub(crate) mod util;
 
-pub use transaction::{Database, Transaction};
 pub use storage::memory::MemStorage;
 pub use storage::{AtomicStorage, IAtomicStorage};
+pub use transaction::{Database, Transaction};
 
 pub type Key = Vec<u8>;
 pub type KeyRef<'a> = &'a [u8];

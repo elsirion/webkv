@@ -55,7 +55,10 @@ impl Transaction {
     }
 
     pub fn find_by_prefix(&mut self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
-        let transaction_changes_prefix_result = self.changes.range(prefix.to_vec()..);
+        let transaction_changes_prefix_result = self
+            .changes
+            .range(prefix.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(prefix));
 
         let snapshot_prefix_result = self.snapshot.find_by_prefix(prefix)?;
 
@@ -65,16 +68,22 @@ impl Transaction {
             snapshot_prefix_result,
             |(key1, _), (key2, _)| (*key1).cmp(key2),
         )
-            .filter_map(|either| match either {
-                EitherOrBoth::Left((key, maybe_value)) => {
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-                EitherOrBoth::Right((key, value)) => Some((key, value)),
-                EitherOrBoth::Both((key, maybe_value), _snapshot) => {
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            EitherOrBoth::Left((key, maybe_value)) => {
+                // TODO: restructure to avoid many inserts
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+            EitherOrBoth::Right((key, value)) => {
+                self.read_keys.insert(key.clone());
+                Some((key, value))
+            }
+            EitherOrBoth::Both((key, maybe_value), _snapshot) => {
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -106,13 +115,10 @@ impl Transaction {
             return Err(anyhow::anyhow!("Write-write conflict detected"));
         }
 
-        self.db.snapshot_index.add_generation(
-            &self
-                .changes
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-        )?;
+        self.db
+            .snapshot_index
+            .add_generation(&self.changes.keys().cloned().collect::<Vec<_>>())
+            .expect("might be in inconsistent state at this point"); //TODO: fix
         self.db
             .db
             .write_atomically(self.changes.into_iter().collect())
