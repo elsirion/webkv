@@ -208,15 +208,15 @@ impl Snapshot {
             db_prefix_result,
             |(key1, _), (key2, _)| key1.cmp(key2),
         )
-            .filter_map(|either| match either {
-                // Always use snapshot values …
-                EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
-                // … but if there is no snapshot value, use the db value …
-                EitherOrBoth::Right((key, value)) => Some((key, value)),
-                // … and if there is both, use the snapshot value.
-                EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            // Always use snapshot values …
+            EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
+            // … but if there is no snapshot value, use the db value …
+            EitherOrBoth::Right((key, value)) => Some((key, value)),
+            // … and if there is both, use the snapshot value.
+            EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
     }
