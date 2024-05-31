@@ -15,15 +15,10 @@ pub struct LazySnapshotIndex {
 struct LazySnapshotIndexInner {
     db: AtomicStorage,
     current_generation: Generation,
-    active_generations: BTreeMap<Generation, ActiveGeneration>,
+    snapshots: BTreeMap<Generation, usize>,
+    generation_keys: BTreeMap<Generation, HashSet<Key>>,
     /// For each key the generation maps to the previous value that was overwritten by that generation.
-    snapshots: BTreeMap<Key, BTreeMap<Generation, Option<Value>>>,
-}
-
-#[derive(Debug)]
-struct ActiveGeneration {
-    references: usize,
-    mutated_keys: HashSet<Key>,
+    generation_prev_values: BTreeMap<Key, BTreeMap<Generation, Option<Value>>>,
 }
 
 /// Explicitly not cloneable
@@ -38,16 +33,9 @@ impl LazySnapshotIndex {
             inner: Arc::new(RwLock::new(LazySnapshotIndexInner {
                 db,
                 current_generation: 1,
-                active_generations: vec![(
-                    1,
-                    ActiveGeneration {
-                        references: 0,
-                        mutated_keys: Default::default(),
-                    },
-                )]
-                .into_iter()
-                .collect(),
                 snapshots: Default::default(),
+                generation_keys: Default::default(),
+                generation_prev_values: Default::default(),
             })),
         }
     }
@@ -55,15 +43,8 @@ impl LazySnapshotIndex {
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = self.inner.write().expect("Poisoned lock");
         let generation = inner.current_generation;
-        let active_generations_entry = inner
-            .active_generations
-            .entry(generation)
-            // TODO: separate out generations from snapshots
-            .or_insert_with(|| ActiveGeneration {
-                references: 0,
-                mutated_keys: HashSet::new(),
-            });
-        active_generations_entry.references += 1;
+        let snapshot_entry = inner.snapshots.entry(generation).or_insert(0);
+        *snapshot_entry += 1;
 
         Snapshot {
             generation,
@@ -80,18 +61,17 @@ impl LazySnapshotIndex {
         inner.current_generation += 1;
         let current_generation = inner.current_generation;
 
-        inner.active_generations.insert(
-            current_generation,
-            ActiveGeneration {
-                references: 0,
-                mutated_keys: changes.iter().cloned().collect(),
-            },
-        );
+        inner
+            .generation_keys
+            .insert(current_generation, changes.iter().cloned().collect());
 
         for key in changes {
             let maybe_value = inner.db.get(key)?;
-            let snapshot_entry = inner.snapshots.entry(key.clone()).or_default();
-            snapshot_entry.insert(current_generation, maybe_value);
+            inner
+                .generation_prev_values
+                .entry(key.clone())
+                .or_default()
+                .insert(current_generation, maybe_value);
         }
 
         Ok(())
@@ -100,42 +80,55 @@ impl LazySnapshotIndex {
 
 impl LazySnapshotIndexInner {
     fn remove_snapshot(&mut self, snapshot: &Snapshot) {
-        let active_generation = self
-            .active_generations
-            .get_mut(&snapshot.generation)
-            .expect("Generation not found");
-        active_generation.references -= 1;
+        {
+            let snapshot_references = self
+                .snapshots
+                .get_mut(&snapshot.generation)
+                .expect("Generation not found");
+            assert_ne!(*snapshot_references, 0);
+            *snapshot_references -= 1;
+        }
 
         // Now that we have removed a reference to the generation we can check if it can be removed. We only remove from oldest to newest since removing generations in the middle would require complicated checks if some of the cached keys held by it might still be needed.
 
-        // Find the largest set of consecutive generations that can be removed starting from the oldest one
-        let removable_generations = self
-            .active_generations
+        let removable_snapshot_generations = self
+            .snapshots
             .iter()
-            .take_while(|(_, active_generation)| active_generation.references == 0)
+            .take_while(|(_generation, references)| **references == 0)
             .map(|(generation, _)| *generation)
             .collect::<Vec<_>>();
-        // TODO: We might be removing one generation less than we could, since snapshots will only ever read generations strictly larger than their own, but that seems ok for now.
-        let max_removable_generation = removable_generations.last().copied().unwrap_or(0);
+
+        for snapshot_generation in removable_snapshot_generations {
+            self.snapshots.remove(&snapshot_generation);
+        }
+
+        let max_removable_key_generation = self.snapshots.keys().next().copied().unwrap_or(Generation::MAX - 1);
+        let removable_key_generations = self
+            .generation_keys
+            .keys()
+            .take_while(|generation| **generation <= max_removable_key_generation)
+            .cloned()
+            .collect::<Vec<_>>();
 
         // Collect all keys that we need to visit since they were mutated in the removable generations and thus hold value backups for older snapshots to read
-        let keys_to_visit = removable_generations
+        let keys_to_visit = removable_key_generations
             .iter()
             .flat_map(|generation| {
-                self.active_generations
-                    .remove(generation)
-                    .expect("exists")
-                    .mutated_keys
+                self.generation_keys.remove(generation)
             })
+            .flatten()
             .collect::<HashSet<_>>();
 
-        for key in keys_to_visit {
-            let snapshot_entry = self.snapshots.get_mut(&key).expect("key not found");
+        for key in keys_to_visit.clone() {
+            let key_entry = self
+                .generation_prev_values
+                .get_mut(&key)
+                .expect("Key not found");
 
             // Remove all value generations that are inside the removable range
-            *snapshot_entry = snapshot_entry.split_off(&(max_removable_generation + 1));
-            if snapshot_entry.is_empty() {
-                self.snapshots.remove(&key);
+            *key_entry = key_entry.split_off(&(max_removable_key_generation + 1));
+            if key_entry.is_empty() {
+                self.generation_prev_values.remove(&key);
             }
         }
     }
@@ -146,8 +139,9 @@ impl Debug for LazySnapshotIndex {
         let inner = self.inner.read().expect("Poisoned lock");
         f.debug_struct("LazySnapshotIndex")
             .field("current_generation", &inner.current_generation)
-            .field("active_generations", &inner.active_generations)
             .field("snapshots", &inner.snapshots)
+            .field("generation_keys", &inner.generation_keys)
+            .field("snapshots", &inner.generation_prev_values)
             .finish()
     }
 }
@@ -156,7 +150,7 @@ impl Snapshot {
     pub fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
         let inner = self.inner.read().expect("Poisoned lock");
         inner
-            .snapshots
+            .generation_prev_values
             .get(key)
             .and_then(|snapshot| {
                 snapshot
@@ -171,7 +165,7 @@ impl Snapshot {
     pub fn find_by_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
         let inner = self.inner.read().expect("Poisoned lock");
         let snapshot_prefix_result = inner
-            .snapshots
+            .generation_prev_values
             .range(prefix.to_vec()..)
             .flat_map(|(key, generations)| {
                 generations
@@ -190,15 +184,15 @@ impl Snapshot {
             db_prefix_result,
             |(key1, _), (key2, _)| key1.cmp(key2),
         )
-        .filter_map(|either| match either {
-            // Always use snapshot values …
-            EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
-            // … but if there is no snapshot value, use the db value …
-            EitherOrBoth::Right((key, value)) => Some((key, value)),
-            // … and if there is both, use the snapshot value.
-            EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
-        })
-        .collect::<Vec<_>>();
+            .filter_map(|either| match either {
+                // Always use snapshot values …
+                EitherOrBoth::Left((key, maybe_value)) => maybe_value.map(|value| (key, value)),
+                // … but if there is no snapshot value, use the db value …
+                EitherOrBoth::Right((key, value)) => Some((key, value)),
+                // … and if there is both, use the snapshot value.
+                EitherOrBoth::Both((key, maybe_value), _db) => maybe_value.map(|value| (key, value)),
+            })
+            .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -206,16 +200,16 @@ impl Snapshot {
     /// Check if any newer generations than the one the snapshot was created in have mutated the `keys` supplied.
     pub fn check_conflicts(&self, keys: &HashSet<Key>) -> bool {
         let inner = self.inner.read().expect("Poisoned lock");
-        inner.active_generations.range((self.generation + 1)..).any(
-            |(generation_idx, generation)| {
-                let conflicts = generation
-                    .mutated_keys
-                    .intersection(keys)
-                    .collect::<Vec<_>>();
-                debug!(
-                    "Conflict on keys: {:?} in generation {}",
-                    conflicts, generation_idx
-                );
+        inner.generation_keys.range((self.generation + 1)..).any(
+            |(generation_idx, generation_keys)| {
+                let conflicts = generation_keys.intersection(keys).collect::<Vec<_>>();
+
+                if !conflicts.is_empty() {
+                    debug!(
+                        "Conflict on keys: {:?} in generation {}",
+                        conflicts, generation_idx
+                    );
+                }
 
                 !conflicts.is_empty()
             },
@@ -298,25 +292,35 @@ mod tests {
 
         {
             let si_guard = snapshot_index.inner.read().unwrap();
-            assert_eq!(si_guard.active_generations[&1].references, 1);
-            assert_eq!(si_guard.active_generations[&2].references, 2);
+            assert_eq!(si_guard.snapshots[&1], 1);
+            assert_eq!(si_guard.snapshots[&2], 2);
+            assert!(si_guard.generation_keys.get(&1).is_none());
+            assert!(si_guard.generation_keys.get(&2).is_some());
+            assert!(si_guard.generation_keys.get(&3).is_some());
         }
         drop(s0);
 
         {
             let si_guard = snapshot_index.inner.read().unwrap();
-            assert!(si_guard.active_generations.get(&1).is_none());
-            assert_eq!(si_guard.active_generations[&2].references, 2);
+            assert!(si_guard.snapshots.get(&1).is_none());
+            assert_eq!(si_guard.snapshots[&2], 2);
+            assert!(si_guard.generation_keys.get(&1).is_none());
+            assert!(si_guard.generation_keys.get(&2).is_none());
+            assert!(si_guard.generation_keys.get(&3).is_some());
         }
         drop(s1a);
         {
             let si_guard = snapshot_index.inner.read().unwrap();
-            assert_eq!(si_guard.active_generations[&2].references, 1);
+            assert_eq!(si_guard.snapshots[&2], 1);
+            assert!(si_guard.generation_keys.get(&1).is_none());
+            assert!(si_guard.generation_keys.get(&2).is_none());
+            assert!(si_guard.generation_keys.get(&3).is_some());
         }
         drop(s1b);
         {
             let si_guard = snapshot_index.inner.read().unwrap();
-            assert!(si_guard.active_generations.is_empty());
+            assert!(si_guard.snapshots.is_empty());
+            assert!(si_guard.generation_prev_values.is_empty());
         }
     }
 }
