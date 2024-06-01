@@ -1,9 +1,10 @@
 use crate::snapshot::{LazySnapshotIndex, Snapshot};
 use crate::storage::AtomicStorage;
 use crate::{Key, KeyRef, Value};
+use futures_locks::Mutex;
 use itertools::{merge_join_by, EitherOrBoth};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct Database {
     inner: Arc<DatabaseInner>,
@@ -34,8 +35,8 @@ impl Database {
         }
     }
 
-    pub fn transaction(&self) -> Transaction {
-        let snapshot = self.inner.snapshot_index.snapshot();
+    pub async fn transaction(&self) -> Transaction {
+        let snapshot = self.inner.snapshot_index.snapshot().await;
         Transaction {
             db: self.inner.clone(),
             snapshot,
@@ -46,21 +47,21 @@ impl Database {
 }
 
 impl Transaction {
-    pub fn get(&mut self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
+    pub async fn get(&mut self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
         self.read_keys.insert(key.to_vec());
         if let Some(value) = self.changes.get(key) {
             return Ok(value.clone());
         }
-        self.snapshot.get(key)
+        self.snapshot.get(key).await
     }
 
-    pub fn find_by_prefix(&mut self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
+    pub async fn find_by_prefix(&mut self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
         let transaction_changes_prefix_result = self
             .changes
             .range(prefix.to_vec()..)
             .take_while(|(key, _)| key.starts_with(prefix));
 
-        let snapshot_prefix_result = self.snapshot.find_by_prefix(prefix)?;
+        let snapshot_prefix_result = self.snapshot.find_by_prefix(prefix).await?;
 
         // TODO: maybe deduplicate with snapshot impl and avoid allocations by returning iterators in some cases
         let result = merge_join_by(
@@ -96,21 +97,22 @@ impl Transaction {
         self.changes.insert(key, None);
     }
 
-    pub fn commit(self) -> anyhow::Result<()> {
-        let _commit_guard = self.db.commit_lock.lock().expect("poisoned");
+    pub async fn commit(self) -> anyhow::Result<()> {
+        let _commit_guard = self.db.commit_lock.lock().await;
 
         if self.changes.is_empty() {
             // A read-only transaction doesn't need to commit anything and can't have conflicts
             return Ok(());
         }
 
-        if self.snapshot.check_conflicts(&self.read_keys) {
+        if self.snapshot.check_conflicts(&self.read_keys).await {
             return Err(anyhow::anyhow!("Read-write conflict detected"));
         }
 
         if self
             .snapshot
             .check_conflicts(&self.changes.keys().cloned().collect())
+            .await
         {
             return Err(anyhow::anyhow!("Write-write conflict detected"));
         }
@@ -118,9 +120,11 @@ impl Transaction {
         self.db
             .snapshot_index
             .add_generation(&self.changes.keys().cloned().collect::<Vec<_>>())
+            .await
             .expect("might be in inconsistent state at this point"); //TODO: fix
         self.db
             .db
             .write_atomically(self.changes.into_iter().collect())
+            .await
     }
 }
