@@ -1,3 +1,5 @@
+#![allow(clippy::arc_with_non_send_sync)]
+
 pub(crate) mod snapshot;
 pub(crate) mod storage;
 mod transaction;

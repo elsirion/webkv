@@ -1,5 +1,7 @@
+use crate::async_trait_maybe_send;
 use crate::storage::IAtomicStorage;
 use crate::{Key, KeyRef, Value};
+use macro_rules_attribute::apply;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -8,12 +10,13 @@ pub struct MemStorage {
     data: Mutex<BTreeMap<Key, Value>>,
 }
 
+#[apply(async_trait_maybe_send)]
 impl IAtomicStorage for MemStorage {
-    fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
+    async fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
         Ok(self.data.lock().expect("poisoned").get(key).cloned())
     }
 
-    fn find_by_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
+    async fn find_by_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
         let prefix = prefix.to_vec();
         let result = self
             .data
@@ -26,7 +29,7 @@ impl IAtomicStorage for MemStorage {
         Ok(result)
     }
 
-    fn write_atomically(&self, changes: Vec<(Key, Option<Value>)>) -> anyhow::Result<()> {
+    async fn write_atomically(&self, changes: Vec<(Key, Option<Value>)>) -> anyhow::Result<()> {
         let mut db = self.data.lock().expect("poisoned");
         for (key, maybe_value) in changes {
             match maybe_value {
