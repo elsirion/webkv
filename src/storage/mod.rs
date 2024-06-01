@@ -1,3 +1,5 @@
+#[cfg(target_family = "wasm")]
+pub mod idb;
 pub mod memory;
 
 use crate::{async_trait_maybe_send, maybe_add_send_sync, Key, KeyRef, Value};
