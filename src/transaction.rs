@@ -70,22 +70,22 @@ impl Transaction {
             snapshot_prefix_result,
             |(key1, _), (key2, _)| (*key1).cmp(key2),
         )
-            .filter_map(|either| match either {
-                EitherOrBoth::Left((key, maybe_value)) => {
-                    // TODO: restructure to avoid many inserts
-                    self.read_keys.insert(key.clone());
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-                EitherOrBoth::Right((key, value)) => {
-                    self.read_keys.insert(key.clone());
-                    Some((key, value))
-                }
-                EitherOrBoth::Both((key, maybe_value), _snapshot) => {
-                    self.read_keys.insert(key.clone());
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            EitherOrBoth::Left((key, maybe_value)) => {
+                // TODO: restructure to avoid many inserts
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+            EitherOrBoth::Right((key, value)) => {
+                self.read_keys.insert(key.clone());
+                Some((key, value))
+            }
+            EitherOrBoth::Both((key, maybe_value), _snapshot) => {
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
     }

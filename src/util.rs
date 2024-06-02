@@ -29,16 +29,16 @@ macro_rules! async_trait_maybe_send {
 
 #[cfg(not(target_family = "wasm"))]
 pub fn spawn<F>(_name: &str, future: F)
-    where
-        F: Future<Output=()> + 'static + Send,
+where
+    F: Future<Output = ()> + 'static + Send,
 {
     tokio::spawn(future);
 }
 
 #[cfg(target_family = "wasm")]
 pub fn spawn<F>(_name: &str, future: F)
-    where
-        F: Future<Output=()> + 'static,
+where
+    F: Future<Output = ()> + 'static,
 {
     wasm_bindgen_futures::spawn_local(future);
 }

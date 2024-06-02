@@ -351,7 +351,7 @@ mod tests {
             let si_guard = snapshot_index.inner.read().await;
             si_guard.snapshots.get(&1).is_none()
         })
-            .await;
+        .await;
         {
             let si_guard = snapshot_index.inner.read().await;
             assert_eq!(si_guard.snapshots[&2], 2);
@@ -367,7 +367,7 @@ mod tests {
             let si_guard = snapshot_index.inner.read().await;
             si_guard.snapshots[&2] == 1
         })
-            .await;
+        .await;
         {
             let si_guard = snapshot_index.inner.read().await;
             assert!(si_guard.generation_keys.get(&1).is_none());
@@ -381,7 +381,7 @@ mod tests {
             let si_guard = snapshot_index.inner.read().await;
             si_guard.snapshots.is_empty()
         })
-            .await;
+        .await;
         {
             let si_guard = snapshot_index.inner.read().await;
             assert!(si_guard.generation_prev_values.is_empty());
@@ -389,16 +389,16 @@ mod tests {
     }
 
     async fn wait_for<P, F>(predicate: P)
-        where
-            P: Fn() -> F,
-            F: Future<Output=bool>,
+    where
+        P: Fn() -> F,
+        F: Future<Output = bool>,
     {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !predicate().await {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
-            .await
-            .unwrap();
+        .await
+        .unwrap();
     }
 }

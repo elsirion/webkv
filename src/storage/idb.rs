@@ -1,8 +1,8 @@
 use crate::{async_trait_maybe_send, IAtomicStorage, Key, KeyRef, Value};
-use macro_rules_attribute::apply;
-use idb::{TransactionMode, Query, CursorDirection, KeyRange, ObjectStoreParams, DatabaseEvent};
-use wasm_bindgen::JsValue;
 use anyhow::Context;
+use idb::{CursorDirection, DatabaseEvent, KeyRange, ObjectStoreParams, Query, TransactionMode};
+use macro_rules_attribute::apply;
+use wasm_bindgen::JsValue;
 
 pub struct IdbStorage {
     db: idb::Database,
@@ -23,11 +23,11 @@ impl IdbStorage {
             let db = vc_event.database().expect("DB not found in upgrade event");
             let mut object_store_params = ObjectStoreParams::new();
             object_store_params.auto_increment(false);
-            db.create_object_store(&store_name_inner, object_store_params).expect("Failed to create object store");
+            db.create_object_store(&store_name_inner, object_store_params)
+                .expect("Failed to create object store");
         });
 
-        let db = db_req.await
-            .map_err(idb_error_to_anyhow)?;
+        let db = db_req.await.map_err(idb_error_to_anyhow)?;
 
         Ok(Self {
             db,
@@ -70,7 +70,7 @@ impl IAtomicStorage for IdbStorage {
             .db
             .transaction(&[&self.store_name], TransactionMode::ReadOnly)
             .map_err(idb_error_to_anyhow)?;
-        let cursor = dbtx
+        let Some(cursor) = dbtx
             .object_store(&self.store_name)
             .map_err(idb_error_to_anyhow)?
             .open_cursor(
@@ -83,7 +83,9 @@ impl IAtomicStorage for IdbStorage {
             .map_err(idb_error_to_anyhow)?
             .await
             .map_err(idb_error_to_anyhow)?
-            .context("IndexedDB didn't return cursor")?;
+        else {
+            return Ok(vec![]);
+        };
 
         // TODO: maybe make iterator?
         let mut result = Vec::new();
@@ -111,7 +113,11 @@ impl IAtomicStorage for IdbStorage {
             }
 
             result.push((key, value));
-            cursor.next(None).map_err(idb_error_to_anyhow)?.await.map_err(idb_error_to_anyhow)?;
+            cursor
+                .next(None)
+                .map_err(idb_error_to_anyhow)?
+                .await
+                .map_err(idb_error_to_anyhow)?;
         }
 
         Ok(result)
