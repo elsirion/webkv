@@ -7,6 +7,7 @@ pub(crate) mod util;
 
 #[cfg(target_family = "wasm")]
 pub use storage::idb::IdbStorage;
+pub use storage::memory::MemStorage;
 pub use storage::{AtomicStorage, IAtomicStorage};
 pub use transaction::{Database, Transaction};
 
