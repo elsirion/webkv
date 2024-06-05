@@ -1,10 +1,12 @@
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+use futures_locks::Mutex;
+use itertools::{merge_join_by, EitherOrBoth};
+
 use crate::snapshot::{LazySnapshotIndex, Snapshot};
 use crate::storage::AtomicStorage;
 use crate::{Key, KeyRef, Value};
-use futures_locks::Mutex;
-use itertools::{merge_join_by, EitherOrBoth};
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Database {
@@ -64,28 +66,29 @@ impl Transaction {
 
         let snapshot_prefix_result = self.snapshot.find_by_prefix(prefix).await?;
 
-        // TODO: maybe deduplicate with snapshot impl and avoid allocations by returning iterators in some cases
+        // TODO: maybe deduplicate with snapshot impl and avoid allocations by returning
+        // iterators in some cases
         let result = merge_join_by(
             transaction_changes_prefix_result,
             snapshot_prefix_result,
             |(key1, _), (key2, _)| (*key1).cmp(key2),
         )
-            .filter_map(|either| match either {
-                EitherOrBoth::Left((key, maybe_value)) => {
-                    // TODO: restructure to avoid many inserts
-                    self.read_keys.insert(key.clone());
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-                EitherOrBoth::Right((key, value)) => {
-                    self.read_keys.insert(key.clone());
-                    Some((key, value))
-                }
-                EitherOrBoth::Both((key, maybe_value), _snapshot) => {
-                    self.read_keys.insert(key.clone());
-                    maybe_value.clone().map(|value| (key.clone(), value))
-                }
-            })
-            .collect::<Vec<_>>();
+        .filter_map(|either| match either {
+            EitherOrBoth::Left((key, maybe_value)) => {
+                // TODO: restructure to avoid many inserts
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+            EitherOrBoth::Right((key, value)) => {
+                self.read_keys.insert(key.clone());
+                Some((key, value))
+            }
+            EitherOrBoth::Both((key, maybe_value), _snapshot) => {
+                self.read_keys.insert(key.clone());
+                maybe_value.clone().map(|value| (key.clone(), value))
+            }
+        })
+        .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -102,7 +105,8 @@ impl Transaction {
         let _commit_guard = self.db.commit_lock.lock().await;
 
         if self.changes.is_empty() {
-            // A read-only transaction doesn't need to commit anything and can't have conflicts
+            // A read-only transaction doesn't need to commit anything and can't have
+            // conflicts
             return Ok(());
         }
 
@@ -133,15 +137,19 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
     use futures::future::join_all;
+
     use crate::Database;
 
     async fn increment_or_insert_key(db: &Database, key: &[u8]) -> anyhow::Result<()> {
         let mut transaction = db.transaction().await;
 
-        let value = transaction.get(key).await?.map(|value_bytes| {
-            u64::from_be_bytes(value_bytes.try_into().unwrap())
-        }).unwrap_or_default();
+        let value = transaction
+            .get(key)
+            .await?
+            .map(|value_bytes| u64::from_be_bytes(value_bytes.try_into().unwrap()))
+            .unwrap_or_default();
 
         let new_value_bytes = (value + 1).to_be_bytes().to_vec();
 
@@ -167,7 +175,10 @@ mod tests {
 
         join_all(tasks).await;
 
-        assert_eq!(db.transaction().await.get(b"counter").await.unwrap(), Some(PARALLEL_TRANSACTIONS.to_be_bytes().to_vec()));
+        assert_eq!(
+            db.transaction().await.get(b"counter").await.unwrap(),
+            Some(PARALLEL_TRANSACTIONS.to_be_bytes().to_vec())
+        );
 
         dbg!(fail_count.load(std::sync::atomic::Ordering::Relaxed));
     }

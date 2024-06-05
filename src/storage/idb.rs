@@ -1,8 +1,9 @@
-use crate::{async_trait_maybe_send, IAtomicStorage, Key, KeyRef, Value};
 use anyhow::Context;
 use idb::{CursorDirection, DatabaseEvent, KeyRange, ObjectStoreParams, Query, TransactionMode};
 use macro_rules_attribute::apply;
 use wasm_bindgen::JsValue;
+
+use crate::{async_trait_maybe_send, IAtomicStorage, Key, KeyRef, Value};
 
 pub struct IdbStorage {
     db: idb::Database,

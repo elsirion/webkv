@@ -1,10 +1,11 @@
-use crate::async_trait_maybe_send;
-use crate::storage::IAtomicStorage;
-use crate::{Key, KeyRef, Value};
-use macro_rules_attribute::apply;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use rand::{Rng, thread_rng};
+
+use macro_rules_attribute::apply;
+use rand::{thread_rng, Rng};
+
+use crate::storage::IAtomicStorage;
+use crate::{async_trait_maybe_send, Key, KeyRef, Value};
 
 #[derive(Default, Debug)]
 pub struct MemStorage {
@@ -52,7 +53,8 @@ impl IAtomicStorage for MemStorage {
     }
 }
 
-/// Simulate yielding execution to the runtime and awaiting some result from an async operation like an IndexedDB query.
+/// Simulate yielding execution to the runtime and awaiting some result from an
+/// async operation like an IndexedDB query.
 #[cfg(test)]
 async fn delay_in_test() {
     let random_delay_us = thread_rng().gen_range(500..1500);

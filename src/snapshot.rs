@@ -1,18 +1,21 @@
-use crate::storage::AtomicStorage;
-use crate::util::spawn;
-use crate::{Key, KeyRef, Value};
-use futures_locks::RwLock;
-use itertools::{merge_join_by, EitherOrBoth};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+
+use futures_locks::RwLock;
+use itertools::{merge_join_by, EitherOrBoth};
 use tracing::debug;
+
+use crate::storage::AtomicStorage;
+use crate::util::spawn;
+use crate::{Key, KeyRef, Value};
 
 pub type Generation = u64;
 
 pub struct LazySnapshotIndex {
     inner: Arc<RwLock<LazySnapshotIndexInner>>,
-    /// We cannot call async code in `Drop::drop`, so we send cleanup jobs to a background worker task
+    /// We cannot call async code in `Drop::drop`, so we send cleanup jobs to a
+    /// background worker task
     drop_snapshot_sender: tokio::sync::mpsc::UnboundedSender<Generation>,
 }
 
@@ -21,7 +24,8 @@ struct LazySnapshotIndexInner {
     current_generation: Generation,
     snapshots: BTreeMap<Generation, usize>,
     generation_keys: BTreeMap<Generation, HashSet<Key>>,
-    /// For each key the generation maps to the previous value that was overwritten by that generation.
+    /// For each key the generation maps to the previous value that was
+    /// overwritten by that generation.
     generation_prev_values: BTreeMap<Key, BTreeMap<Generation, Option<Value>>>,
 }
 
@@ -71,7 +75,8 @@ impl LazySnapshotIndex {
         }
     }
 
-    /// Has to be called before writing changes to the database to generate a sparse snapshot of the current DB state.
+    /// Has to be called before writing changes to the database to generate a
+    /// sparse snapshot of the current DB state.
     pub async fn add_generation(&self, changes: &[Key]) -> anyhow::Result<()> {
         // FIXME: don't write if no transactions are active
         // TODO: maybe even filter out keys that are shadowed anyway
@@ -108,7 +113,10 @@ impl LazySnapshotIndexInner {
             *snapshot_references -= 1;
         }
 
-        // Now that we have removed a reference to the generation we can check if it can be removed. We only remove from oldest to newest since removing generations in the middle would require complicated checks if some of the cached keys held by it might still be needed.
+        // Now that we have removed a reference to the generation we can check if it can
+        // be removed. We only remove from oldest to newest since removing generations
+        // in the middle would require complicated checks if some of the cached keys
+        // held by it might still be needed.
 
         let removable_snapshot_generations = self
             .snapshots
@@ -134,7 +142,8 @@ impl LazySnapshotIndexInner {
             .cloned()
             .collect::<Vec<_>>();
 
-        // Collect all keys that we need to visit since they were mutated in the removable generations and thus hold value backups for older snapshots to read
+        // Collect all keys that we need to visit since they were mutated in the
+        // removable generations and thus hold value backups for older snapshots to read
         let keys_to_visit = removable_key_generations
             .iter()
             .flat_map(|generation| self.generation_keys.remove(generation))
@@ -221,7 +230,8 @@ impl Snapshot {
         Ok(result)
     }
 
-    /// Check if any newer generations than the one the snapshot was created in have mutated the `keys` supplied.
+    /// Check if any newer generations than the one the snapshot was created in
+    /// have mutated the `keys` supplied.
     pub async fn check_conflicts(&self, keys: &HashSet<Key>) -> bool {
         let inner = self.inner.read().await;
         inner.generation_keys.range((self.generation + 1)..).any(
@@ -249,11 +259,12 @@ impl Drop for Snapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+
     use crate::snapshot::{LazySnapshotIndex, Snapshot};
     use crate::storage::memory::MemStorage;
     use crate::storage::IAtomicStorage;
-    use std::future::Future;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_snapshot() {
