@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+use embed_doc_image::embed_doc_image;
 use futures_locks::Mutex;
 use itertools::{merge_join_by, EitherOrBoth};
 
@@ -8,6 +9,8 @@ use crate::snapshot::{LazySnapshotIndex, Snapshot};
 use crate::storage::AtomicStorage;
 use crate::{Key, KeyRef, Value};
 
+/// Reference to a database supporting optimistic, snapshot isolated
+/// transactions
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<DatabaseInner>,
@@ -19,6 +22,60 @@ struct DatabaseInner {
     commit_lock: Mutex<()>,
 }
 
+/// Allows reading and writing data based on a snapshot of the database. All
+/// writes will either be applied atomically when calling
+/// [`Transaction::commit`] succeeds or rolled back if it fails or the
+/// transaction is dropped without calling `commit`.
+///
+/// ## Implementation
+/// To achieve snapshot isolation, the transaction struct uses the following
+/// components:
+///   - **DB Snapshot**: A [`Snapshot`] is a reference to the DB state at which
+///     the transaction was started. The actual snapshot data is managed by
+///     [`LazySnapshotIndex`], from which the [`Snapshot`] was obtained. Reading
+///     from the snapshot will always return the value that was present in the
+///     DB at the time the transaction was started.
+///   - **Written Key-Value Pairs**: a map (`changes`) containing the values to
+///     all keys that have been written to during the transaction. Reading from
+///     this map will return the value that was written during the transaction.
+///   - **Read Keys**: a set (`read_keys`) containing all keys that have been
+///     read during the transaction.
+///
+/// ### Reading from the transaction
+/// When reading a key, the transaction will first check if the key has been
+/// written to during the transaction by looking it up in `changes`. If it has,
+/// the value from `changes` will be returned. If not, the value from the
+/// snapshot will be returned. In both cases, the key will be added to
+/// `read_keys`.
+///
+/// ![Diagram of transaction read operations][tx_read]
+///
+/// ### Writing to the transaction
+/// When writing to a key, the key-value pair is added to the `changes` map,
+/// overwriting any value already present under that key.
+///
+/// ![Diagram of transaction write operations][tx_write]
+///
+/// ### Committing the transaction
+/// When committing the transaction, the following steps are taken atomically
+/// (protected by a commit lock):
+///   1. Check for read-write conflicts by checking that none of the keys in
+///      `read_keys` have been written to in the DB since the transaction
+///      started (this is done using the snapshot index)
+///   2. Check for write-write conflicts by checking that none of the keys in
+///      `changes` have been written to in the DB since the transaction started
+///      (this is done using the snapshot index)
+///   3. Add the keys in `changes` to the snapshot index, it is crucial that
+///      this is done before writing the changes to the DB so that the snapshot
+///      index can backup the old values
+///   4. Write the changes to the DB atomically
+///
+/// Not that the below diagram only makes sense seen in context of
+/// [`LazySnapshotIndex`] since a lot of the transaction functionality is
+/// delegated to it. ![Diagram of transaction commit][tx_commit]
+#[embed_doc_image("tx_read", "images/transaction_read.png")]
+#[embed_doc_image("tx_write", "images/transaction_write.png")]
+#[embed_doc_image("tx_commit", "images/transaction_commit.png")]
 pub struct Transaction {
     db: Arc<DatabaseInner>,
     snapshot: Snapshot,
@@ -38,6 +95,7 @@ impl Database {
         }
     }
 
+    /// Start a new transaction, snapshotting the current DB state
     pub async fn transaction(&self) -> Transaction {
         let snapshot = self.inner.snapshot_index.snapshot().await;
         Transaction {

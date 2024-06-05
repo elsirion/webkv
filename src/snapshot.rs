@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use embed_doc_image::embed_doc_image;
 use futures_locks::RwLock;
 use itertools::{merge_join_by, EitherOrBoth};
 use tracing::debug;
@@ -12,6 +13,80 @@ use crate::{Key, KeyRef, Value};
 
 pub type Generation = u64;
 
+/// An index of all the overwritten keys and their previous values that are
+/// still being referenced by active [`Snapshot`]s. We use the concept of
+/// [`Generation`]s to track atomic changes to the database. Think of them as
+/// the result of a commit.
+///
+/// # Implementation
+/// The index is implemented as a [`BTreeMap`] of [`Key`]s to a [`BTreeMap`] of
+/// [`Generation`]s to **their previous** [`Value`]s stored as `Option<Value>`
+/// since the previous value might have been undefined/absent. These two layers
+/// allow:
+///   * Efficient prefix-search of keys
+///   * Efficient lookup of the next-larger generation of a key than a given
+///     snapshot generation
+///
+/// The emphasis on "*their previous*" is important here, because the value of a
+/// key in the snapshot index is the value that was present in the database
+/// before the generation was committed. So when looking for the values as it
+/// would have been returned by the database at generation `x` we look at all
+/// generations in `(x+1)..`.
+///
+/// ## Adding Generations
+/// When a new generations is created using
+/// [`LazySnapshotIndex::add_generation`] the snapshot index will increment the
+/// `current_generation`, fetch the values of all keys that were mutated in that
+/// generation and store them in the index under the new `current_generation`.
+///
+/// After a new generation is created the caller is expected to atomically write
+/// the new values to the database, while this isn't the job of the snapshot
+/// index, it is important to know for the following explanations.
+///
+/// ![Adding a generation to the index][new_gen]
+///
+/// ## Adding snapshots
+/// Adding a snapshot is done by calling [`LazySnapshotIndex::snapshot`]. This
+/// creates or increments an entry in the [`LazySnapshotIndexInner::snapshots`]
+/// map. The snapshot generation is the `current_generation` at the time the
+/// snapshot was created. The entry in `snapshots` prevents generations
+/// necessary to look up values from the snapshot from being removed from the
+/// index.
+///
+/// ## Looking up values from a snapshot
+/// When looking up a value from a snapshot we first check if the key exists in
+/// [`LazySnapshotIndexInner::generation_prev_values`]. If so we look for the
+/// first generation that is strictly higher than the snapshot generation and
+/// return the value from that generation. If the key isn't found in the index
+/// we look up the value from the database.
+///
+/// Note that the lookup in `generation_prev_values` may return `Some(None)`,
+/// which means there is an entry with value none, indicating that at time of
+/// the snapshot the key didn't exist in the database, but was later written to.
+/// In that case `None` is returned.
+///
+/// Some examples for snapshot key value lookups:
+///
+/// ![Snapshot lookup examples][snapshot_lookup_0]
+///
+/// ## Dropping snapshots
+/// When a snapshot is dropped the generation is sent to a background worker
+/// that will decrement the respective `sessions` entry and remove it if zero.
+/// It then looks up the oldest generation `g` that still has an active snapshot
+/// and removes all generations that are lower (=older) than `g+1` from the
+/// index. The `+1` stems from the backed up values overwritten in `g` not being
+/// needed for lookups of keys in session `g`.
+///
+/// When removing a generation the [`LazySnapshotIndexInner::generation_keys`]
+/// index is used to determine which keys need to be visited to remove
+/// generation value backups from. Once all keys have been visited the
+/// generation is removed from the `generation_keys` index.
+///
+/// ![Snapshots becoming unreferenced and generations being
+/// removed][snapshot_removal]
+#[embed_doc_image("new_gen", "images/new_gen.png")]
+#[embed_doc_image("snapshot_lookup", "images/snapshot_lookup.png")]
+#[embed_doc_image("snapshot_removal", "images/snapshot_removal.png")]
 pub struct LazySnapshotIndex {
     inner: Arc<RwLock<LazySnapshotIndexInner>>,
     /// We cannot call async code in `Drop::drop`, so we send cleanup jobs to a
@@ -20,12 +95,26 @@ pub struct LazySnapshotIndex {
 }
 
 struct LazySnapshotIndexInner {
+    /// Database reference to read values from if key isn't found in the
+    /// snapshot and when creating value backups.
     db: AtomicStorage,
+    /// Each commit to the DB creates a new generation. This counter references
+    /// the current one.
     current_generation: Generation,
+    /// Generations for which there are active snapshots. The value is the
+    /// number of active snapshots. Note that the snapshot generation is the
+    /// `current_generation` when the snapshot was created, this means we only
+    /// look for values from generations strictly higher than that when looking
+    /// up keys.
     snapshots: BTreeMap<Generation, usize>,
+    /// For each generation the keys that were mutated in that generation. This
+    /// is a performance optimization to avoid having to scan all keys in the DB
+    /// when deleting a generation.
     generation_keys: BTreeMap<Generation, HashSet<Key>>,
     /// For each key the generation maps to the previous value that was
-    /// overwritten by that generation.
+    /// overwritten by that generation. When looking up a key, the first value
+    /// with a strictly higher generation than the snapshot generation is
+    /// returned.
     generation_prev_values: BTreeMap<Key, BTreeMap<Generation, Option<Value>>>,
 }
 
