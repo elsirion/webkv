@@ -4,6 +4,7 @@ use crate::{Key, KeyRef, Value};
 use macro_rules_attribute::apply;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use rand::{Rng, thread_rng};
 
 #[derive(Default, Debug)]
 pub struct MemStorage {
@@ -13,10 +14,14 @@ pub struct MemStorage {
 #[apply(async_trait_maybe_send)]
 impl IAtomicStorage for MemStorage {
     async fn get(&self, key: KeyRef<'_>) -> anyhow::Result<Option<Value>> {
+        delay_in_test().await;
+
         Ok(self.data.lock().expect("poisoned").get(key).cloned())
     }
 
     async fn find_by_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Key, Value)>> {
+        delay_in_test().await;
+
         let prefix = prefix.to_vec();
         let result = self
             .data
@@ -30,6 +35,8 @@ impl IAtomicStorage for MemStorage {
     }
 
     async fn write_atomically(&self, changes: Vec<(Key, Option<Value>)>) -> anyhow::Result<()> {
+        delay_in_test().await;
+
         let mut db = self.data.lock().expect("poisoned");
         for (key, maybe_value) in changes {
             match maybe_value {
@@ -43,4 +50,11 @@ impl IAtomicStorage for MemStorage {
         }
         Ok(())
     }
+}
+
+/// Simulate yielding execution to the runtime and awaiting some result from an async operation like an IndexedDB query.
+#[cfg(test)]
+async fn delay_in_test() {
+    let random_delay_us = thread_rng().gen_range(500..1500);
+    tokio::time::sleep(std::time::Duration::from_micros(random_delay_us)).await;
 }

@@ -70,22 +70,22 @@ impl Transaction {
             snapshot_prefix_result,
             |(key1, _), (key2, _)| (*key1).cmp(key2),
         )
-        .filter_map(|either| match either {
-            EitherOrBoth::Left((key, maybe_value)) => {
-                // TODO: restructure to avoid many inserts
-                self.read_keys.insert(key.clone());
-                maybe_value.clone().map(|value| (key.clone(), value))
-            }
-            EitherOrBoth::Right((key, value)) => {
-                self.read_keys.insert(key.clone());
-                Some((key, value))
-            }
-            EitherOrBoth::Both((key, maybe_value), _snapshot) => {
-                self.read_keys.insert(key.clone());
-                maybe_value.clone().map(|value| (key.clone(), value))
-            }
-        })
-        .collect::<Vec<_>>();
+            .filter_map(|either| match either {
+                EitherOrBoth::Left((key, maybe_value)) => {
+                    // TODO: restructure to avoid many inserts
+                    self.read_keys.insert(key.clone());
+                    maybe_value.clone().map(|value| (key.clone(), value))
+                }
+                EitherOrBoth::Right((key, value)) => {
+                    self.read_keys.insert(key.clone());
+                    Some((key, value))
+                }
+                EitherOrBoth::Both((key, maybe_value), _snapshot) => {
+                    self.read_keys.insert(key.clone());
+                    maybe_value.clone().map(|value| (key.clone(), value))
+                }
+            })
+            .collect::<Vec<_>>();
 
         Ok(result)
     }
@@ -127,5 +127,63 @@ impl Transaction {
             .db
             .write_atomically(self.changes.into_iter().collect())
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use futures::future::join_all;
+    use crate::Database;
+
+    async fn increment_or_insert_key(db: &Database, key: &[u8]) -> anyhow::Result<()> {
+        let mut transaction = db.transaction().await;
+
+        let value = transaction.get(key).await?.map(|value_bytes| {
+            u64::from_be_bytes(value_bytes.try_into().unwrap())
+        }).unwrap_or_default();
+
+        let new_value_bytes = (value + 1).to_be_bytes().to_vec();
+
+        transaction.set(key.to_vec(), new_value_bytes);
+        transaction.commit().await
+    }
+
+    async fn parallel_transactions() {
+        const PARALLEL_TRANSACTIONS: usize = 100;
+        let db = Database::new(Arc::new(crate::MemStorage::default()));
+
+        let fail_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let tasks = (0..PARALLEL_TRANSACTIONS).map(|_| {
+            let db_inner = db.clone();
+            let fail_count = fail_count.clone();
+            async move {
+                while let Err(_) = increment_or_insert_key(&db_inner, b"counter").await {
+                    fail_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+
+        join_all(tasks).await;
+
+        assert_eq!(db.transaction().await.get(b"counter").await.unwrap(), Some(PARALLEL_TRANSACTIONS.to_be_bytes().to_vec()));
+
+        dbg!(fail_count.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_parallel_transactions_mt1() {
+        parallel_transactions().await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_parallel_transactions_st() {
+        parallel_transactions().await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_parallel_transactions_mt4() {
+        parallel_transactions().await
     }
 }
