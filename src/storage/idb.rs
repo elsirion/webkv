@@ -5,13 +5,14 @@ use wasm_bindgen::JsValue;
 
 use crate::{async_trait_maybe_send, IAtomicStorage, Key, KeyRef, Value};
 
+const IDB_STORE_NAME: &str = "webkv";
+
 pub struct IdbStorage {
     db: idb::Database,
-    store_name: String,
 }
 
 impl IdbStorage {
-    pub async fn new(db_name: &str, store_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(db_name: &str) -> anyhow::Result<Self> {
         // TODO: prevent opening the same store multiple times
         let idb_factory = idb::Factory::new().map_err(idb_error_to_anyhow)?;
 
@@ -19,21 +20,17 @@ impl IdbStorage {
             .open(db_name, Some(1))
             .map_err(idb_error_to_anyhow)?;
 
-        let store_name_inner = store_name.to_owned();
         db_req.on_upgrade_needed(move |vc_event| {
             let db = vc_event.database().expect("DB not found in upgrade event");
             let mut object_store_params = ObjectStoreParams::new();
             object_store_params.auto_increment(false);
-            db.create_object_store(&store_name_inner, object_store_params)
+            db.create_object_store(IDB_STORE_NAME, object_store_params)
                 .expect("Failed to create object store");
         });
 
         let db = db_req.await.map_err(idb_error_to_anyhow)?;
 
-        Ok(Self {
-            db,
-            store_name: store_name.to_owned(),
-        })
+        Ok(Self { db })
     }
 }
 
@@ -44,10 +41,10 @@ impl IAtomicStorage for IdbStorage {
 
         let dbtx = self
             .db
-            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
+            .transaction(&[IDB_STORE_NAME], TransactionMode::ReadOnly)
             .map_err(idb_error_to_anyhow)?;
         let result = dbtx
-            .object_store(&self.store_name)
+            .object_store(IDB_STORE_NAME)
             .map_err(idb_error_to_anyhow)?
             .get(Query::Key(JsValue::from(&hex_key)))
             .map_err(idb_error_to_anyhow)?
@@ -69,10 +66,10 @@ impl IAtomicStorage for IdbStorage {
         let hex_prefix = hex::encode(prefix);
         let dbtx = self
             .db
-            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
+            .transaction(&[IDB_STORE_NAME], TransactionMode::ReadOnly)
             .map_err(idb_error_to_anyhow)?;
         let Some(cursor) = dbtx
-            .object_store(&self.store_name)
+            .object_store(IDB_STORE_NAME)
             .map_err(idb_error_to_anyhow)?
             .open_cursor(
                 Some(Query::KeyRange(
@@ -127,7 +124,7 @@ impl IAtomicStorage for IdbStorage {
     async fn write_atomically(&self, changes: Vec<(Key, Option<Value>)>) -> anyhow::Result<()> {
         let dbtx = self
             .db
-            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
+            .transaction(&[IDB_STORE_NAME], TransactionMode::ReadWrite)
             .map_err(idb_error_to_anyhow)?;
 
         for (key, value) in changes {
@@ -135,7 +132,7 @@ impl IAtomicStorage for IdbStorage {
                 Some(value) => {
                     let hex_key = hex::encode(&key);
                     let hex_value = hex::encode(&value);
-                    dbtx.object_store(&self.store_name)
+                    dbtx.object_store(IDB_STORE_NAME)
                         .map_err(idb_error_to_anyhow)?
                         .put(&JsValue::from(&hex_value), Some(&JsValue::from(&hex_key)))
                         .map_err(idb_error_to_anyhow)?
@@ -144,7 +141,7 @@ impl IAtomicStorage for IdbStorage {
                 }
                 None => {
                     let hex_key = hex::encode(&key);
-                    dbtx.object_store(&self.store_name)
+                    dbtx.object_store(IDB_STORE_NAME)
                         .map_err(idb_error_to_anyhow)?
                         .delete(JsValue::from(&hex_key))
                         .map_err(idb_error_to_anyhow)?

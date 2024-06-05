@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use macro_rules_attribute::apply;
-use rand::{thread_rng, Rng};
 
 use crate::storage::IAtomicStorage;
 use crate::{async_trait_maybe_send, Key, KeyRef, Value};
@@ -57,6 +56,10 @@ impl IAtomicStorage for MemStorage {
 /// async operation like an IndexedDB query.
 #[cfg(test)]
 async fn delay_in_test() {
+    use rand::{thread_rng, Rng};
     let random_delay_us = thread_rng().gen_range(500..1500);
     tokio::time::sleep(std::time::Duration::from_micros(random_delay_us)).await;
 }
+
+#[cfg(not(test))]
+async fn delay_in_test() {}

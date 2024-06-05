@@ -1,3 +1,5 @@
+#![cfg(target_family = "wasm")]
+
 use std::sync::Arc;
 
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -7,7 +9,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 async fn test_basic_ops() {
-    let db = Database::new(Arc::new(IdbStorage::new("test", "test").await.unwrap()));
+    let db = Database::new(Arc::new(IdbStorage::new("test").await.unwrap()));
     let mut tx = db.transaction().await;
 
     // Can read empty DB
