@@ -179,8 +179,6 @@ mod tests {
             db.transaction().await.get(b"counter").await.unwrap(),
             Some(PARALLEL_TRANSACTIONS.to_be_bytes().to_vec())
         );
-
-        dbg!(fail_count.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
