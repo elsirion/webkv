@@ -67,7 +67,7 @@ pub type Generation = u64;
 ///
 /// Some examples for snapshot key value lookups:
 ///
-/// ![Snapshot lookup examples][snapshot_lookup_0]
+/// ![Snapshot lookup examples][snapshot_lookup]
 ///
 /// ## Dropping snapshots
 /// When a snapshot is dropped the generation is sent to a background worker
