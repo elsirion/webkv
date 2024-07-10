@@ -97,6 +97,7 @@ impl Database {
 
     /// Start a new transaction, snapshotting the current DB state
     pub async fn transaction(&self) -> Transaction {
+        let _lock = self.inner.commit_lock.lock().await;
         let snapshot = self.inner.snapshot_index.snapshot().await;
         Transaction {
             db: self.inner.clone(),
@@ -195,8 +196,12 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use futures::future::join_all;
+    use rand::prelude::IteratorRandom;
+    use rand::rngs::StdRng;
+    use rand::{thread_rng, Rng, SeedableRng};
 
     use crate::Database;
 
@@ -239,18 +244,104 @@ mod tests {
         );
     }
 
+    async fn random_transaction(
+        db: &Database,
+        increment_keys: impl IntoIterator<Item = &[u8]>,
+        read_keys: impl IntoIterator<Item = &[u8]>,
+    ) -> anyhow::Result<()> {
+        let mut transaction = db.transaction().await;
+
+        for key in increment_keys {
+            let value = transaction
+                .get(key)
+                .await?
+                .map(|value_bytes| u64::from_be_bytes(value_bytes.try_into().unwrap()))
+                .unwrap_or_default();
+
+            let new_value_bytes = (value + 1).to_be_bytes().to_vec();
+
+            transaction.set(key.to_vec(), new_value_bytes);
+        }
+
+        for key in read_keys {
+            transaction.get(key).await?;
+        }
+
+        transaction.commit().await
+    }
+
+    async fn parallel_random_transactions() {
+        const PARALLEL_WORKERS: usize = 10;
+        const TRANSACTIONS_PER_WORKER: usize = 10;
+        const TRANSACTION_DELAY_RANGE: std::ops::Range<Duration> =
+            Duration::from_millis(10)..Duration::from_millis(100);
+        const WRITES_PER_TRANSACTION: usize = 10;
+        const READS_PER_TRANSACTION: usize = 10;
+        const NUM_KEYS: usize = 50;
+
+        let mut rng = thread_rng();
+        let db = Database::new(Arc::new(crate::MemStorage::default()));
+        let fail_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let possible_keys = (0..NUM_KEYS).map(|i| i.to_be_bytes()).collect::<Vec<_>>();
+
+        let tasks = (0..PARALLEL_WORKERS).map(|_| {
+            let db_inner = db.clone();
+            let write_keys = possible_keys
+                .iter()
+                .choose_multiple(&mut rng, WRITES_PER_TRANSACTION);
+            let read_keys = possible_keys
+                .iter()
+                .choose_multiple(&mut rng, READS_PER_TRANSACTION);
+            let mut rng_inner = StdRng::from_rng(&mut rng).unwrap();
+            let fail_count_inner = fail_count.clone();
+            async move {
+                for _ in 0..TRANSACTIONS_PER_WORKER {
+                    tokio::time::sleep(rng_inner.gen_range(TRANSACTION_DELAY_RANGE.clone())).await;
+                    while let Err(_) = random_transaction(
+                        &db_inner,
+                        read_keys.iter().map(|k| k.as_slice()),
+                        write_keys.iter().map(|k| k.as_slice()),
+                    )
+                    .await
+                    {
+                        fail_count_inner.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(rng_inner.gen_range(TRANSACTION_DELAY_RANGE.clone()))
+                            .await;
+                    }
+                }
+            }
+        });
+
+        join_all(tasks).await;
+
+        assert_eq!(
+            db.transaction()
+                .await
+                .find_by_prefix(&[])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(_key, val)| { u64::from_be_bytes(val.try_into().unwrap()) as usize })
+                .sum::<usize>(),
+            PARALLEL_WORKERS * TRANSACTIONS_PER_WORKER * WRITES_PER_TRANSACTION
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_parallel_transactions_mt1() {
-        parallel_transactions().await
+        parallel_transactions().await;
+        parallel_random_transactions().await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_parallel_transactions_st() {
-        parallel_transactions().await
+        parallel_transactions().await;
+        parallel_random_transactions().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_parallel_transactions_mt4() {
-        parallel_transactions().await
+        parallel_transactions().await;
+        parallel_random_transactions().await;
     }
 }
