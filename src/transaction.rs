@@ -97,6 +97,7 @@ impl Database {
 
     /// Start a new transaction, snapshotting the current DB state
     pub async fn transaction(&self) -> Transaction {
+        let _lock = self.inner.commit_lock.lock().await;
         let snapshot = self.inner.snapshot_index.snapshot().await;
         Transaction {
             db: self.inner.clone(),
